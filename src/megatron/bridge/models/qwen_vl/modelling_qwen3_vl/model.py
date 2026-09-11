@@ -270,10 +270,15 @@ class Qwen3VLModel(MegatronModule):
 
             vision_embeds = None
             if vision_grid_thw is not None and vision_grid_thw.shape[0] > 0:
-                vision_embeds, deepstack_feature_lists = self.vision_model(
+                # Use named attribute access instead of tuple unpacking: HF 5.5.4's
+                # Qwen3VLVisionModel.forward() returns BaseModelOutputWithDeepstackFeatures
+                # (3 fields), which doesn't unpack safely into 2 variables.
+                _vision_out = self.vision_model(
                     hidden_states=vision_data,
                     grid_thw=vision_grid_thw,
                 )
+                vision_embeds = _vision_out.pooler_output
+                deepstack_feature_lists = _vision_out.deepstack_features
 
             combined_embeddings = self.language_model.embedding(
                 input_ids=input_ids,

@@ -33,6 +33,12 @@ class EnergonProvider(DatasetProvider):
     num_workers: int_repr
     dataloader_type: str = "external"
     task_encoder: Optional[Any] = None
+    # Opt-in online (in-batch) sequence packing. Default False preserves the
+    # benchmark's full-seq_length padding path in vlm_step.get_batch. When True,
+    # get_batch concatenates the microbatch's sequences into one THD sequence with
+    # cu_seqlens (no padding). Requires micro_batch_size > 1 (enforced in
+    # training/config.py). The mock/hf/preloaded providers already expose this field.
+    pack_sequences_in_batch: bool = False
 
     def build_datasets(self, context: DatasetBuildContext):
         dataset = EnergonMultiModalDataModule(

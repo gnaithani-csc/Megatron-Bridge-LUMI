@@ -13,7 +13,11 @@
 # limitations under the License.
 
 import torch.distributed as dist
-from nvidia_resiliency_ext.inprocess import CallWrapper
+# nvidia_resiliency_ext is an NVIDIA package and is not installed in this ROCm container, so guard the import.
+try:
+    from nvidia_resiliency_ext.inprocess import CallWrapper
+except ImportError:
+    CallWrapper = None  # type: ignore[assignment,misc]
 
 from megatron.bridge.data.utils import get_dataset_provider
 from megatron.bridge.training.callbacks import Callback, CallbackManager, normalize_callbacks
@@ -104,7 +108,7 @@ def _pretrain(
     forward_step_func: ForwardStepCallable,
     callback_manager: CallbackManager | None = None,
     store: dist.Store | None = None,
-    inprocess_call_wrapper: CallWrapper | None = None,
+    inprocess_call_wrapper: "CallWrapper | None" = None,
 ) -> None:
     """Internal function containing the actual pretrain logic.
 

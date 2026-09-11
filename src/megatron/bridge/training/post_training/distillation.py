@@ -14,17 +14,22 @@
 
 from typing import Callable
 
-import modelopt.torch.distill as mtd
-import modelopt.torch.distill.plugins.megatron as mtd_mcore
+# modelopt (NVIDIA TensorRT Model Optimizer) is not installed in this ROCm container. This uses its distillation submodule.
+try:
+    import modelopt.torch.distill as mtd
+    import modelopt.torch.distill.plugins.megatron as mtd_mcore
+
+    class ModelOptDistillConfig(mtd_mcore.DistillationConfig):
+        """Configuration settings for Model Optimizer distillation."""
+
+        pass
+except ImportError:
+    mtd = None  # type: ignore[assignment]
+    mtd_mcore = None  # type: ignore[assignment]
+    ModelOptDistillConfig = None  # type: ignore[assignment]
 import torch
 from megatron.core import parallel_state
 from megatron.core.transformer import MegatronModule
-
-
-class ModelOptDistillConfig(mtd_mcore.DistillationConfig):
-    """Configuration settings for Model Optimizer distillation."""
-
-    pass
 
 
 def loss_func_kd(
@@ -38,6 +43,8 @@ def loss_func_kd(
         original_loss_fn (Callable): The original loss function
         model (GPTModel): The model (can be wrapped)
     """
+    if mtd is None:
+        raise RuntimeError("modelopt is not available on ROCm; knowledge distillation cannot be used")
     assert isinstance(model, mtd.DistillationModel), "Model must be a ModelOpt DistillationModel"
 
     # Standard lm loss

@@ -99,6 +99,7 @@ class Qwen3VLCommonKwargs(TypedDict, total=False):
     dataset_type: Optional[str]
     image_folder: Optional[str]
     tokenizer_model: Optional[str]
+    pack_sequences_in_batch: bool
     # PEFT options
     peft: Optional[Union[str, PEFT]]
     finetune_lr: float
@@ -114,12 +115,77 @@ def qwen3_vl_8b_pretrain_config(**user_kwargs: Unpack[Qwen3VLCommonKwargs]) -> C
         "tensor_model_parallel_size": 4,
         "pipeline_model_parallel_size": 1,
         "expert_model_parallel_size": 1,
-        "freeze_language_model": True,
+        "freeze_language_model": False,
         "freeze_vision_model": True,
         "freeze_vision_projection": False,
     }
     combined_kwargs: Qwen3VLCommonKwargs = {**recommended_kwargs, **user_kwargs}
     return _qwen3_vl_common(**combined_kwargs)
+
+
+def qwen3_vl_8b_throughput_mock_config(**user_kwargs: Unpack[Qwen3VLCommonKwargs]) -> ConfigContainer:
+    """Qwen3-VL 8B throughput test with mock data, ViT frozen.
+
+    Full 36-layer LM, TP=1 DP=8 on a single 8-GPU node, mock dataset.
+    ViT is frozen (ViT is ~600M params vs 8B LM; forward still runs for visual embeddings).
+    """
+    recommended_kwargs: Qwen3VLCommonKwargs = {
+        "hf_path": "Qwen/Qwen3-VL-8B-Instruct",
+        "tensor_model_parallel_size": 1,
+        "pipeline_model_parallel_size": 1,
+        "expert_model_parallel_size": 1,
+        "freeze_language_model": False,
+        "freeze_vision_model": True,
+        "freeze_vision_projection": False,
+        "mock": True,
+        "train_iters": 30,
+        "save_interval": 0,
+    }
+    combined_kwargs: Qwen3VLCommonKwargs = {**recommended_kwargs, **user_kwargs}
+    config = _qwen3_vl_common(**combined_kwargs)
+    config.train.eval_iters = 0
+    config.train.eval_interval = 1000000
+    # Both local and te train correctly once gradient_accumulation_fusion is set to False below.
+    # That setting is what fixes the ROCm failure, not the choice of implementation, so local is
+    # just a safe default here. You can set transformer_impl to "te" to use Transformer Engine.
+    config.model.transformer_impl = "local"
+    # When this is enabled, the weight-gradient matmul accumulates into an fp32 buffer, and hipBLASLt
+    # has no kernel for that shape on the MI250X. In that case te crashes and local silently returns
+    # zero gradients. Setting it to False sends the weight gradient through normal autograd instead.
+    config.model.gradient_accumulation_fusion = False
+    # On the older ROCm 6.4 stack, Transformer Engine's fused cross-entropy backward returned zero
+    # gradients whenever labels were masked. It works on ROCm 7.0, but the native version is correct
+    # on both, so it stays the default for portability.
+    config.model.cross_entropy_fusion_impl = "native"
+    return config
+
+
+def qwen3_vl_8b_synth_cap_energon_config(**user_kwargs: Unpack[Qwen3VLCommonKwargs]) -> ConfigContainer:
+    """Qwen3-VL 8B throughput test with synthetic caption Energon data."""
+    # Build the Energon provider during recipe construction; post-build CLI overrides are too late.
+    recommended_kwargs: Qwen3VLCommonKwargs = {
+        "hf_path": "Qwen/Qwen3-VL-8B-Instruct",
+        "tensor_model_parallel_size": 1,
+        "pipeline_model_parallel_size": 1,
+        "expert_model_parallel_size": 1,
+        "freeze_language_model": False,
+        "freeze_vision_model": True,
+        "freeze_vision_projection": False,
+        "dataset_type": "energon",
+        "train_data_path": ["/scratch/project_462001202/gnaithan/synth_data/Qwen3_VL/cap_pretrain_converted"],
+        "train_iters": 20,
+        "save_interval": 0,
+    }
+    combined_kwargs: Qwen3VLCommonKwargs = {**recommended_kwargs, **user_kwargs}
+    config = _qwen3_vl_common(**combined_kwargs)
+    # Disable validation/test for this train-only throughput dataset, matching the mock recipe.
+    config.train.eval_iters = 0
+    config.train.eval_interval = 1000000
+    # These three settings are the ROCm workarounds. See the mock throughput recipe above for why.
+    config.model.transformer_impl = "local"
+    config.model.gradient_accumulation_fusion = False
+    config.model.cross_entropy_fusion_impl = "native"
+    return config
 
 
 def qwen3_vl_30b_a3b_pretrain_config(**user_kwargs: Unpack[Qwen3VLCommonKwargs]) -> ConfigContainer:
@@ -324,6 +390,8 @@ def _qwen3_vl_common(
     dataset_type: Optional[str] = None,
     image_folder: Optional[str] = None,
     tokenizer_model: Optional[str] = None,
+    # Opt-in online (in-batch) sequence packing; default False = status-quo padding.
+    pack_sequences_in_batch: bool = False,
     # PEFT options
     peft: Optional[Union[str, PEFT]] = None,
     finetune_lr: Optional[float] = None,
@@ -437,6 +505,8 @@ def _qwen3_vl_common(
             seq_length=seq_length,
             hf_processor_path=_processor_model,
             prompt="Describe this image.",
+            image_size=(1120, 700),
+            num_images=4,
             num_workers=1,
             dataloader_type="single",
             data_sharding=True,
@@ -444,6 +514,7 @@ def _qwen3_vl_common(
             persistent_workers=False,
             create_attention_mask=True,
             pad_to_max_length=True,
+            pack_sequences_in_batch=pack_sequences_in_batch,
         )
     elif _dataset_choice == "preloaded":
         dataset_cfg = PreloadedVLMConversationProvider(
@@ -490,6 +561,7 @@ def _qwen3_vl_common(
                 min_pixels=200704,
                 max_pixels=1003520,
             ),
+            pack_sequences_in_batch=pack_sequences_in_batch,
         )
     else:
         raise ValueError(

@@ -24,7 +24,10 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from megatron.core.models.gpt import GPTModel as MCoreGPTModel
-from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_with_transformer_engine_spec
+from megatron.core.models.gpt.gpt_layer_specs import (
+    get_gpt_layer_local_spec,
+    get_gpt_layer_with_transformer_engine_spec,
+)
 from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLTextConfig, Qwen3VLVisionConfig
 from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import Qwen3VLMoeTextConfig
 
@@ -110,13 +113,24 @@ class Qwen3VLModelProvider(GPTModelProvider):
         language_transformer_config = self
         hf_vision_config = self.vision_config
 
-        # Spec for the Qwen3VLTransformerLayer
-        language_transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
-            num_experts=None,
-            moe_grouped_gemm=False,
-            qk_layernorm=self.qk_layernorm,
-            fp8=False,
-        )
+        # Build the spec for the Qwen3VLTransformerLayer according to transformer_impl. For "local" we
+        # use MCore's native PyTorch modules, otherwise we use Transformer Engine's fused ops. The stock
+        # provider always used Transformer Engine here. We also pass normalization explicitly, because
+        # the local spec defaults to LayerNorm but Qwen3-VL uses RMSNorm.
+        if self.transformer_impl == "local":
+            language_transformer_layer_spec = get_gpt_layer_local_spec(
+                num_experts=None,
+                moe_grouped_gemm=False,
+                qk_layernorm=self.qk_layernorm,
+                normalization=self.normalization,
+            )
+        else:
+            language_transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
+                num_experts=None,
+                moe_grouped_gemm=False,
+                qk_layernorm=self.qk_layernorm,
+                fp8=False,
+            )
 
         model = Qwen3VLModel(
             language_transformer_config=language_transformer_config,
@@ -254,12 +268,21 @@ class Qwen3VLMoEModelProvider(GPTModelProvider):
         language_transformer_config = self
         hf_vision_config = self.vision_config
 
-        language_transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
-            num_experts=self.num_moe_experts,
-            moe_grouped_gemm=True,
-            qk_layernorm=self.qk_layernorm,
-            fp8=False,
-        )
+        # Same handling of transformer_impl as in Qwen3VLProvider.provide above.
+        if self.transformer_impl == "local":
+            language_transformer_layer_spec = get_gpt_layer_local_spec(
+                num_experts=self.num_moe_experts,
+                moe_grouped_gemm=True,
+                qk_layernorm=self.qk_layernorm,
+                normalization=self.normalization,
+            )
+        else:
+            language_transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
+                num_experts=self.num_moe_experts,
+                moe_grouped_gemm=True,
+                qk_layernorm=self.qk_layernorm,
+                fp8=False,
+            )
 
         # Reuse Qwen3VLModel for MoE model but replace the language model with MoE language model
         model = Qwen3VLModel(

@@ -16,7 +16,11 @@ import logging
 from functools import partial
 from typing import Iterable
 
-import modelopt.torch.distill as mtd
+# modelopt (NVIDIA TensorRT Model Optimizer) is not installed in this ROCm container. This uses its distillation submodule.
+try:
+    import modelopt.torch.distill as mtd
+except ImportError:
+    mtd = None  # type: ignore[assignment]
 import torch
 from megatron.core import parallel_state
 from megatron.core.models.gpt import GPTModel
@@ -358,6 +362,8 @@ def _create_loss_function_modelopt(
     Returns:
         A partial function that can be called with output_tensor to compute the loss
     """
+    if mtd is None:
+        raise RuntimeError("modelopt is not available on ROCm; forward_step_modelopt cannot be used")
     mnt_loss_func = partial(
         masked_next_token_loss,
         loss_mask,

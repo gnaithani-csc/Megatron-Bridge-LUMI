@@ -52,6 +52,11 @@ class TrainState(Stateful):
     do_train: bool = False
     do_valid: bool = False
     do_test: bool = False
+    # Actual GPU-computed tokens (batch_size × actual_padded_seq_len, not × cfg.model.seq_length).
+    # Not persisted in state_dict, so it resets to 0 on checkpoint resume. That is fine because
+    # tokens/sec and TFLOP/s are rolling-window metrics, not cumulative.
+    consumed_train_tokens: int = 0
+    last_batch_seq_len: int = 0
 
     def state_dict(self) -> dict[str, torch.Tensor]:
         """Serializes the training state into a dictionary of tensors.

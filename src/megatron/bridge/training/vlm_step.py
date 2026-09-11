@@ -266,7 +266,12 @@ def get_batch(data_iterator: Iterable, cfg: ConfigContainer, use_mtp: bool = Fal
             if batch.get("attention_mask") is not None:
                 batch["attention_mask"] = pad_or_truncate_attn_to_len(batch.get("attention_mask"), seq_len, seq_len)  # type: ignore[assignment]
         else:
-            # No PP: pad sequence length to nearest multiple of 128 for efficiency (capped at model seq_length)
+            # For the benchmark we pad every batch to the full seq_length so that energon and mock
+            # runs process the same number of tokens per step. Otherwise energon only pads to the
+            # nearest multiple of 128 above the longest sequence, which is smaller than seq_length,
+            # so it does less GPU work per step and looks faster than mock. For real training, change
+            # this back to min(seq_cap, _ceil_to_mult(cur_len, 128)) so short batches are not padded
+            # needlessly.
             seq_cap = cfg.model.seq_length
 
             def _ceil_to_mult(n: int, mult: int) -> int:
@@ -275,7 +280,7 @@ def get_batch(data_iterator: Iterable, cfg: ConfigContainer, use_mtp: bool = Fal
             tokens_or_input = batch.get("tokens") if batch.get("tokens") is not None else batch.get("input_ids")
             if tokens_or_input is not None:
                 cur_len = tokens_or_input.size(1)
-                target_len = min(seq_cap, _ceil_to_mult(cur_len, 128))
+                target_len = seq_cap
 
                 # tokens/input_ids
                 padded_tokens = pad_or_truncate_2d_to_len(tokens_or_input, target_len, seq_cap, pad_value=0)
@@ -389,6 +394,13 @@ def forward_step(
             visual_inputs,
         ) = get_batch(data_iterator, state.cfg, use_mtp, pg_collection=pg_collection)
     timers("batch-generator").stop()
+
+    # tokens is only available on the first PP stage; other stages receive None.
+    # Record actual GPU-computed tokens so training_log can report accurate tokens/sec
+    # and TFLOP/s (energon batches are padded to ceil(max_seq, 128), not to seq_length).
+    if tokens is not None:
+        state.train_state.consumed_train_tokens += tokens.numel()
+        state.train_state.last_batch_seq_len = tokens.shape[1]
 
     forward_args = {
         "input_ids": tokens,

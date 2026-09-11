@@ -50,11 +50,18 @@ from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.rerun_state_machine import get_rerun_state_machine
 from megatron.core.transformer import MegatronModule
 from megatron.core.utils import get_pg_size, unwrap_model
-from modelopt.torch.opt.plugins import (
-    restore_modelopt_state,
-    save_modelopt_state,
-    save_sharded_modelopt_state,
-)
+# modelopt (NVIDIA TensorRT Model Optimizer) is an NVIDIA package and is not installed in this ROCm container, so guard the import.
+try:
+    from modelopt.torch.opt.plugins import (
+        restore_modelopt_state,
+        save_modelopt_state,
+        save_sharded_modelopt_state,
+    )
+except ImportError:
+    # Without modelopt the model is never modified, so these no-op stubs have no state to save or restore.
+    def restore_modelopt_state(model, state_dict): pass
+    def save_modelopt_state(model, state_dict): pass
+    def save_sharded_modelopt_state(model, checkpoint_name, fmt): pass
 
 from megatron.bridge.peft.base import PEFT
 from megatron.bridge.training import fault_tolerance

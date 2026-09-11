@@ -13,104 +13,124 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-#SBATCH --job-name=megatron-bridge-train
-#SBATCH --nodes=2
-#SBATCH --ntasks-per-node=8
+# ==============================================================================
+# Multi-node Slurm launch (LUMI / ROCm)
+#
+# Usage:
+#   sbatch launch_with_sbatch.sh
+#
+# One torchrun process per node (ntasks-per-node=1) spawns 8 GPU workers
+# internally. SLURM_NODEID is evaluated per srun task so each node gets the
+# correct --node_rank. All env-var and PYTHONPATH logic mirrors
+# launch_interactive.sh.
+# ==============================================================================
+
+#SBATCH --job-name=mb_multinode
+#SBATCH --nodes=4
+#SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=8
-#SBATCH --time=04:00:00
-#SBATCH --partition=gpu
-#SBATCH --account=my_account
+#SBATCH --time=03:00:00
+#SBATCH --partition=dev-g #standard-g
+#SBATCH --account=project_462001202 #462000131  #project_462001202
 #SBATCH --output=logs/train_%j.out
 #SBATCH --error=logs/train_%j.err
 #SBATCH --exclusive
+#SBATCH --mem=0
 
-# ==============================================================================
-# Direct Slurm Launch with sbatch (Alternative to NeMo-Run)
-#
-# This script demonstrates how to launch generic training scripts directly
-# using sbatch without NeMo-Run. This is useful for traditional HPC workflows.
-#
-# Usage:
-#   1. Modify the #SBATCH directives above for your cluster
-#   2. Set the configuration variables below
-#   3. Submit: sbatch launch_with_sbatch.sh
-#
-# For NeMo-Run based launching (recommended for remote management), see
-# launch_with_nemo_run.py
-# ==============================================================================
+set -euox pipefail
 
-# ==============================================================================
-# CONFIGURATION - Modify these for your setup
-# ==============================================================================
-
-# Training script to run
 TRAINING_SCRIPT="run_recipe.py"
-# Options:
-# TRAINING_SCRIPT="run_recipe.py"
-# TRAINING_SCRIPT="pretrain_vlm.py"  # For VLM models
-# TRAINING_SCRIPT="finetune_vlm.py"  # For VLM finetuning
+RECIPE="qwen3_vl_8b_synth_cap_energon_config"      #"qwen3_vl_8b_throughput_mock_config"
+STEP_TYPE="vlm_step"
+#export NVTE_DEBUG=1
+#export NVTE_DEBUG_LEVEL=2
+#export NCCL_TUNER_PLUGIN=/appl/local/containers/for-turkunlp-team/tuner-2025-07-09/librccl-tuner.so
+#export NCCL_DEBUG=INFO
+#export NCCL_DEBUG_SUBSYS=INIT,TUNING,NET,COLL
+#export NCCL_DEBUG_FILE=nccl.%h.%p.log
+#if [ "$SLURM_NODEID" = "0" ] || [ "$SLURM_LOCALID" = "0" ]; then
+#    export NCCL_DEBUG=INFO                           # OFF, WARN(warnings and errors), INFO(Basic info + version, initialization, size info) , TRACE(Verbose)
+#    export NCCL_DEBUG_SUBSYS=INIT,TUNING,NET,COLL    # INIT, TUNING(algo selection), NET(comm layer), COLL(collectives)
+#    export NCCL_DEBUG_FILE=logs/nccl/nccl.%h.%p.log  # %h hostname, %p process ID
+#fi
 
-# Recipe name (must match a recipe function from megatron.bridge.recipes)
-RECIPE="llama32_1b_pretrain_config"
-# Examples:
-# RECIPE="gemma3_1b_pretrain_config"
-# RECIPE="qwen3_8b_sft_config"
-# RECIPE="llama3_8b_pretrain_config"
-# RECIPE="qwen25_vl_pretrain_config"  # For VLM models
+# Batch size lives in two configs: train.* (trainer: grad-accum / schedule) and
+# dataset.* (dataloader: batch size it emits). Keep the two equal or they desync.
+# GBS scales with node count (about 64 per 8 GPUs), so it is 256 for 4 nodes.
+CLI_OVERRIDES="model.tensor_model_parallel_size=2 \
+train.micro_batch_size=1 \
+dataset.micro_batch_size=1 \
+dataset.num_workers=1 \
+dataset.pin_memory=True \
+train.global_batch_size=256 \
+dataset.global_batch_size=256 \
+logger.log_throughput_to_tensorboard=true \
+logger.log_throughput=true \
+logger.log_interval=5 \
+model.transformer_impl=te \
+train.train_iters=10  \
+model.gradient_accumulation_fusion=False \
+model.cross_entropy_fusion_impl=te "
 
-# Forward step type (gpt or vlm)
-STEP_TYPE="gpt"
+#export NVTE_DEBUG=1
+#export NVTE_DEBUG_LEVEL=2
+#export NVTE_UNFUSED_ATTN=0
 
-# Optional: CLI overrides (Hydra-style dot notation)
-CLI_OVERRIDES=""
-# CLI_OVERRIDES="train.train_iters=1000 train.global_batch_size=512 optimizer.lr=0.0002"
-
-# Container image (required)
-CONTAINER_IMAGE=""
-# CONTAINER_IMAGE="/path/to/container.sqsh"
-
-# Container mounts (optional, space-separated)
+# Container image (set by lumi-aif-singularity-bindings)
+module use /appl/local/laifs/modules
+module load lumi-aif-singularity-bindings
+export SIF_plus="/appl/local/laifs/containers/lumi-multitorch-u24r70f21m50t210-20260513_121430/lumi-multitorch-plus-u24r70f21m50t210-20260513_121430.sif"
+CONTAINER_IMAGE=$SIF_plus
 CONTAINER_MOUNTS=""
-# CONTAINER_MOUNTS="/data:/data /model:/model"
+VENV=$PROJ_DIR/env_megatron
 
 # ==============================================================================
 # Environment Setup
 # ==============================================================================
+export TORCH_DIST_INIT_TIMEOUT=600  # seconds, for the TCPStore rendezvous
+export MEGATRON_CONFIG_LOCK_DIR=/tmp
 
-# Set common environment variables
+
 export TORCH_NCCL_AVOID_RECORD_STREAMS=1
-export NCCL_NVLS_ENABLE=0
+# Reduce allocator fragmentation so reserved-but-unallocated memory can satisfy new allocations.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-# Authentication tokens (uncomment and set your tokens)
-# export HF_TOKEN="hf_your_token_here"
-# export WANDB_API_KEY="your_wandb_key_here"
+export NCCL_SOCKET_IFNAME=hsn      # Slingshot high-speed network (recommended for multi-node)
 
-# Optional: Uncomment if needed
-# export CUDA_DEVICE_MAX_CONNECTIONS=1
-# export NCCL_DEBUG=INFO
+#export MIOPEN_ROOT="/scratch/project_462001202/$USER/cache/miopen
+export MIOPEN_ROOT="/tmp/$USER/miopen-$SLURM_JOB_ID-$SLURM_NODEID"
+mkdir -p "$MIOPEN_ROOT"
+export MIOPEN_USER_DB_PATH="$MIOPEN_ROOT"
+export MIOPEN_CUSTOM_CACHE_DIR="$MIOPEN_ROOT"
+#export MIOPEN_DISABLE_CACHE=1
+
+export PYTORCH_TUNABLEOP_ENABLED=0
+#export TORCH_BLAS_PREFER_HIPBLASLT=0
+
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+
+#export NCCL_DEBUG=INFO
+#export NCCL_DEBUG_SUBSYS=COLL
+#export RCCL_MSCCL_ENABLE=0
+#export NCCL_ALGO=Ring
+
+export HF_HUB_CACHE=/scratch/project_462001202/$USER/cache/hub
+export HF_HUB_OFFLINE=1
+# SLURM_SUBMIT_DIR is the cwd at submission time.
+# Convention: submit from the repo root — sbatch scripts/training/launch_with_sbatch.sh
+REPO_DIR="${SLURM_SUBMIT_DIR}"
+export PYTHONPATH="${REPO_DIR}/src:${PYTHONPATH:-}"
+export PYTHONPATH="$HOME/Megatron-LM:$PYTHONPATH" #"${REPO_DIR}/3rdparty/Megatron-LM:$PYTHONPATH"
+export PYTHONPATH="$VENV/lib/python3.12/site-packages:$PYTHONPATH"
+export PYTHONPATH="$PYTHONPATH:/opt/venv/lib/python3.12/site-packages/flash_attn-2.8.0.post2-py3.12-linux-x86_64.egg" # For Turku-nlp conatainer
 
 # ==============================================================================
 # Job Execution
 # ==============================================================================
 
-echo "======================================"
-echo "Megatron Bridge Training Job"
-echo "======================================"
-echo "Job ID: $SLURM_JOB_ID"
-echo "Nodes: $SLURM_JOB_NUM_NODES"
-echo "GPUs per node: $SLURM_GPUS_PER_NODE"
-echo "Script: $TRAINING_SCRIPT"
-echo "Recipe: $RECIPE"
-if [ -n "$HF_TOKEN" ]; then
-    echo "HF_TOKEN: Set"
-fi
-if [ -n "$WANDB_API_KEY" ]; then
-    echo "WANDB_API_KEY: Set"
-fi
-echo "======================================"
+mkdir -p logs
 
-# Determine script path
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="${REPO_DIR}/scripts/training"
 SCRIPT_PATH="${SCRIPT_DIR}/${TRAINING_SCRIPT}"
 
 if [ ! -f "$SCRIPT_PATH" ]; then
@@ -118,44 +138,57 @@ if [ ! -f "$SCRIPT_PATH" ]; then
     exit 1
 fi
 
-# Build torchrun command
-CMD="torchrun"
-CMD="$CMD --nproc_per_node=$SLURM_GPUS_PER_NODE"
-CMD="$CMD --nnodes=$SLURM_JOB_NUM_NODES"
-CMD="$CMD --node_rank=\$SLURM_PROCID"
-CMD="$CMD --master_addr=\$(scontrol show hostname \$SLURM_NODELIST | head -n1)"
-CMD="$CMD --master_port=29500"
-CMD="$CMD $SCRIPT_PATH"
-CMD="$CMD --recipe $RECIPE"
-CMD="$CMD --step $STEP_TYPE"
-
-# Add CLI overrides if specified
-if [ -n "$CLI_OVERRIDES" ]; then
-    CMD="$CMD $CLI_OVERRIDES"
-fi
-
-echo "Executing: $CMD"
-echo "======================================"
-
-# Require container image
 if [ -z "$CONTAINER_IMAGE" ]; then
-    echo "ERROR: CONTAINER_IMAGE must be set. Please use a valid container image."
+    echo "ERROR: CONTAINER_IMAGE is not set."
     exit 1
 fi
 
-# Build srun command (always containerized)
-SRUN_CMD="srun --mpi=pmix --container-image=$CONTAINER_IMAGE"
+MASTER_ADDR=$(scontrol show hostname "$SLURM_NODELIST" | head -n1)
+GPUS_PER_NODE="${SLURM_GPUS_PER_NODE:-8}"
+NUM_NODES="${SLURM_JOB_NUM_NODES:-1}"
 
-# Add container mounts
-if [ -n "$CONTAINER_MOUNTS" ]; then
-    for mount in $CONTAINER_MOUNTS; do
-        SRUN_CMD="$SRUN_CMD --container-mounts=$mount"
-    done
-fi
+echo "======================================"
+echo "Megatron Bridge Training Job (sbatch)"
+echo "======================================"
+echo "Job ID:        $SLURM_JOB_ID"
+echo "Nodes:         $NUM_NODES"
+echo "GPUs per node: $GPUS_PER_NODE"
+echo "Master addr:   $MASTER_ADDR"
+echo "Script:        $TRAINING_SCRIPT"
+echo "Recipe:        $RECIPE"
+echo "Step:          $STEP_TYPE"
+echo "Overrides:     $CLI_OVERRIDES"
+[ -n "${HF_TOKEN:-}" ]      && echo "HF_TOKEN:      Set"
+[ -n "${WANDB_API_KEY:-}" ] && echo "WANDB_API_KEY: Set"
+echo "======================================"
 
-$SRUN_CMD bash -c "$CMD"
+# \$SLURM_NODEID is intentionally un-expanded here; bash -c evaluates it per srun task.
+CMD="torchrun"
+CMD="$CMD --nproc_per_node=$GPUS_PER_NODE"
+CMD="$CMD --nnodes=$NUM_NODES"
+CMD="$CMD --node_rank=\$SLURM_NODEID"
+CMD="$CMD --master_addr=$MASTER_ADDR"
+CMD="$CMD --master_port=29500"
+CMD="$CMD $SCRIPT_PATH"
+CMD="$CMD --recipe $RECIPE"
+CMD="$CMD --step_func $STEP_TYPE"
+CMD="$CMD --mode pretrain"
+CMD="$CMD --seq_length 8192"
+[ -n "$CLI_OVERRIDES" ] && CMD="$CMD $CLI_OVERRIDES"
+echo "Executing: $CMD"
+echo "======================================"
+
+MOUNT_ARGS=""
+for mount in $CONTAINER_MOUNTS; do
+    MOUNT_ARGS="$MOUNT_ARGS --bind $mount"
+done
+
+srun --label \
+    singularity exec \
+    $MOUNT_ARGS \
+    $CONTAINER_IMAGE \
+    bash -c "export PYTHONPATH='$PYTHONPATH':\${PYTHONPATH:-}; $CMD"
 
 echo "======================================"
 echo "Job completed"
 echo "======================================"
-

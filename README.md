@@ -1,3 +1,9 @@
+> **Note.** This fork has been modified to run on LUMI (AMD MI250X). Setup and run
+> instructions for LUMI are in [`README_LUMI.md`](README_LUMI.md). The original
+> upstream README follows below.
+
+---
+
 <div align="center">
 
 # NeMo Megatron Bridge

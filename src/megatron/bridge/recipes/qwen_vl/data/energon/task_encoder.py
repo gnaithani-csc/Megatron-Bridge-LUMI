@@ -25,6 +25,7 @@ import numpy as np
 import torch
 from megatron.energon import Batch, DefaultTaskEncoder
 from megatron.energon.flavors.base_dataset import Sample
+from megatron.energon.task_encoder.base import stateless
 from megatron.energon.task_encoder.cooking import Cooker, basic_sample_keys
 from PIL import Image
 
@@ -89,19 +90,16 @@ def get_ltor_masks_and_position_ids(
     return attention_mask, loss_mask, position_ids
 
 
-def find_pattern_indices(sequence: np.ndarray, pattern, start: int = 0):
-    """Find the [start, end) indices of the first occurrence of pattern in sequence from start."""
-    if not isinstance(sequence, np.ndarray):
-        sequence = np.array(sequence)
-    pattern = np.array(pattern, dtype=sequence.dtype)
-    n, m = sequence.shape[0], pattern.shape[0]
-    if m == 0 or start >= n:
-        return -1, -1
-    end_limit = n - m + 1
-    for i in range(start, max(end_limit, start)):
-        if np.array_equal(sequence[i : i + m], pattern):
-            return i, i + m
-    return -1, -1
+def _template_encode(tokenizer, messages, add_generation_prompt: bool = False) -> np.ndarray:
+    """Two-step chat-template → token IDs, stable across transformers versions.
+
+    apply_chat_template(tokenize=True) with multimodal list-content messages can return a
+    BatchEncoding dict in newer transformers; np.array(dict) yields a 2-element array of
+    key strings instead of a flat token list. Using tokenize=False first always returns a
+    plain string; encode() always returns a flat list of ints.
+    """
+    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=add_generation_prompt)
+    return np.array(tokenizer.encode(text, add_special_tokens=False), dtype=np.int64)
 
 
 def process_vision(
@@ -114,14 +112,16 @@ def process_vision(
             kwargs["min_pixels"] = min_pixels
         if max_pixels is not None:
             kwargs["max_pixels"] = max_pixels
-        image_inputs = processor(images=images, videos=None, return_tensors="pt", **kwargs)
+        # The processor rejects a videos kwarg here, so we call it with images only.
+        image_inputs = processor(images=images, return_tensors="pt", **kwargs)
         image_grid_thw = image_inputs.get("image_grid_thw", None)
     else:
         image_inputs = {}
         image_grid_thw = None
 
     if videos is not None:
-        videos_inputs = processor(images=None, videos=videos, return_tensors="pt")
+        # Same reason as above, so we call it with videos only.
+        videos_inputs = processor(videos=videos, return_tensors="pt")
         video_grid_thw = videos_inputs.get("video_grid_thw", None)
     else:
         videos_inputs = {}
@@ -231,6 +231,7 @@ def convert_to_qwenvl_content(user_input: str, image_pattern: str = "<image>", v
     return contents
 
 
+@stateless
 def cook_chatml_sample(sample: dict) -> ChatMLSample:
     """
     Convert crude sampel to ChatMLSample.
@@ -384,19 +385,31 @@ class QwenVLTaskEncoder(DefaultTaskEncoder[ChatMLSample, QwenVLTaskSample, QwenV
                 converted_conversation.append({"role": role, "content": content})
         conversation = converted_conversation
 
-        # NOTE: we need to mask all system/user input tokens and assistant generation prefix tokens
-        input_ids = self.hf_tokenizer.apply_chat_template(conversation, tokenize=True, return_tensors="np")[0]
+        # Everything starts masked so that only the assistant answers contribute to the loss.
+        input_ids = _template_encode(self.hf_tokenizer, conversation)
         pad_token_id = self.hf_tokenizer.pad_token_id
         target = [pad_token_id for _ in range(len(input_ids))]
-        search_start_index = 0
-        for turn_idx, turn in enumerate(conversation[1:]):
+        # We need the token positions of the assistant's answer so that only those count toward the
+        # loss. We find them by length, not by matching the answer's tokens. BPE splits the same
+        # answer text differently on its own than it does after the template's thinking tags and
+        # newlines, so searching input_ids for the answer's standalone tokens would fail to find
+        # them. Instead we encode the conversation up to the assistant turn (that length is where
+        # the answer starts) and through it (that length is where the answer ends).
+        for abs_idx, turn in enumerate(conversation):
             if turn["role"] == "assistant":
-                answer = turn["content"]
-                answer_tokens = self.hf_tokenizer.encode(answer, add_special_tokens=False)
-                answer_start, answer_end = find_pattern_indices(input_ids, answer_tokens, search_start_index)
-                assert answer_start > 0, "Not found valid answer in conversation."
+                prefix_ids = _template_encode(
+                    self.hf_tokenizer, conversation[:abs_idx], add_generation_prompt=True
+                )
+                full_through_ids = _template_encode(
+                    self.hf_tokenizer, conversation[: abs_idx + 1]
+                )
+                answer_start = len(prefix_ids)
+                answer_end = len(full_through_ids)
+                assert 0 < answer_start < answer_end <= len(input_ids), (
+                    f"Invalid answer span [{answer_start}, {answer_end}) "
+                    f"for input_ids of length {len(input_ids)}"
+                )
                 target[answer_start:answer_end] = input_ids[answer_start:answer_end]
-                search_start_index = answer_end
 
         # NOTE: expand image_pad & video_pad
         merge_length = self.merge_size**2
@@ -566,6 +579,10 @@ class QwenVLTaskEncoder(DefaultTaskEncoder[ChatMLSample, QwenVLTaskSample, QwenV
         loss_mask[labels < 0] = 0.0
 
         batch = QwenVLTaskBatch(
+            # Energon 7.3.2 requires __key__ and __restore_key__ on the Batch. We pass an empty
+            # __restore_key__ because QwenVLTaskSample carries no restore key and is not a Sample subclass.
+            __key__=samples[0].__key__,
+            __restore_key__=(),
             __keys__=[s.__key__ for s in samples],
             __subflavors__=[s.__subflavors__ for s in samples],
             pixel_values=torch.vstack(imgs) if len(imgs) > 0 else None,

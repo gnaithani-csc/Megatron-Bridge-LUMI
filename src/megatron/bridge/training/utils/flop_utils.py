@@ -25,8 +25,13 @@ from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
 _lora_seq_stats_cache: dict = {}
 
 
-def num_floating_point_operations(cfg: ConfigContainer, batch_size: int = 1):
+def num_floating_point_operations(cfg: ConfigContainer, batch_size: int = 1, seq_len: int | None = None):
     """Return the number of floating point operations"""
+    # Use caller-supplied seq_len when the actual batch is shorter than cfg.model.seq_length
+    # (e.g. energon path pads to ceil(actual_max_seq, 128), not to seq_length). Without this
+    # override the formula overcounts: linear terms by the length ratio and the quadratic
+    # attention kernel by that ratio squared.
+    _seq_len: int = seq_len if seq_len is not None else cfg.model.seq_length
     peft = getattr(cfg, "peft", None)
     is_lora = isinstance(peft, LoRA)
     # If the model provider has a custom TFLOPS calculation method, use it (non-LoRA only).
@@ -338,13 +343,13 @@ def num_floating_point_operations(cfg: ConfigContainer, batch_size: int = 1):
                     ## o proj
                     + (cfg.model.num_attention_heads * getattr(cfg.model, "v_head_dim", 64)) * cfg.model.hidden_size
                     ## core attn
-                    + cfg.model.seq_length
+                    + _seq_len
                     * (
                         cfg.model.num_attention_heads
                         * (getattr(cfg.model, "qk_head_dim", 64) + getattr(cfg.model, "qk_pos_emb_head_dim", 0))
                     )
                     / 2
-                    + cfg.model.seq_length * cfg.model.num_attention_heads * getattr(cfg.model, "v_head_dim", 64) / 2
+                    + _seq_len * cfg.model.num_attention_heads * getattr(cfg.model, "v_head_dim", 64) / 2
                 )
             )
 
@@ -360,7 +365,7 @@ def num_floating_point_operations(cfg: ConfigContainer, batch_size: int = 1):
                         1
                         + (num_query_groups / cfg.model.num_attention_heads)
                         # # Only half of the attention matrix is non-zero and needs to be multiplied with V.
-                        + (cfg.model.seq_length / cfg.model.hidden_size / 2)
+                        + (_seq_len / cfg.model.hidden_size / 2)
                     )
                     * query_projection_to_hidden_size_ratio
                 )
@@ -375,7 +380,7 @@ def num_floating_point_operations(cfg: ConfigContainer, batch_size: int = 1):
 
         total_floating_point_operations = (
             batch_size
-            * cfg.model.seq_length
+            * _seq_len
             * (
                 # MLP
                 expansion_factor
@@ -425,7 +430,7 @@ def num_floating_point_operations(cfg: ConfigContainer, batch_size: int = 1):
         # Compute hybrid model FLOPs.
         return hybrid_flops(
             batch_size=batch_size,
-            seq_len=cfg.model.seq_length,
+            seq_len=_seq_len,
             hidden_size=cfg.model.hidden_size,
             num_attn_layers=num_attn_layers,
             num_mamba_layers=num_mamba_layers,

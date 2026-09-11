@@ -184,3 +184,9 @@ slurm*.out
 
 # UV package manager
 .uv/
+
+
+# Benchmark run outputs
+*.log
+logs/
+

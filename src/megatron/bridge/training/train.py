@@ -48,7 +48,12 @@ from megatron.core.transformer import MegatronModule
 from megatron.core.transformer.cuda_graphs import TECudaGraphHelper
 from megatron.core.transformer.enums import CudaGraphScope
 from megatron.core.utils import check_param_hashes_across_dp_replicas, get_model_config
-from modelopt.torch.distill.plugins.megatron import get_tensor_shapes_adjust_fn_for_distillation
+# modelopt is an NVIDIA package and is not installed in this ROCm container. Distillation is not used here.
+try:
+    from modelopt.torch.distill.plugins.megatron import get_tensor_shapes_adjust_fn_for_distillation
+except ImportError:
+    # Returning None is safe: the else-branch (decentralized pg) already passes None for this argument
+    def get_tensor_shapes_adjust_fn_for_distillation(model, **kwargs): return None
 
 from megatron.bridge.training import fault_tolerance
 from megatron.bridge.training.callbacks import CallbackContext, CallbackManager, should_fire
@@ -249,10 +254,14 @@ def train(
             optimizers=[optimizer],
         )
 
-    # Track train step elapsed time for throughput logging
+    # Track train step elapsed time and actual token counts for throughput logging.
+    # history_consumed_tokens mirrors history_wct; each element is the cumulative
+    # consumed_train_tokens after that iteration so elapsed_tokens = last - first in the window.
     history_wct = None
+    history_consumed_tokens = None
     if config.logger.log_throughput_to_tensorboard:
         history_wct = deque(maxlen=config.logger.throughput_window_size + 1)
+        history_consumed_tokens = deque(maxlen=config.logger.throughput_window_size + 1)
 
     # Wrap forward_backward_func for Full iteration CUDA graph
     forward_backward_func = get_forward_backward_func(
@@ -402,6 +411,7 @@ def train(
 
         if config.logger.log_throughput_to_tensorboard:
             history_wct.append(time.time() - global_state.start_time)
+            history_consumed_tokens.append(global_state.train_state.consumed_train_tokens)
 
         if should_checkpoint:
             save_checkpoint_and_time(
@@ -457,7 +467,11 @@ def train(
         else:
             assert num_skipped_samples_in_batch == 0
         global_state.train_state.skipped_train_samples += num_skipped_samples_in_batch
-        num_floating_point_operations_in_batch = flop_utils.num_floating_point_operations(config, batch_size)
+        # Use actual padded seq len if recorded by the step function (0 means not set).
+        _actual_seq_len = global_state.train_state.last_batch_seq_len or None
+        num_floating_point_operations_in_batch = flop_utils.num_floating_point_operations(
+            config, batch_size, seq_len=_actual_seq_len
+        )
         global_state.train_state.floating_point_operations_so_far += num_floating_point_operations_in_batch
         num_floating_point_operations_so_far = global_state.train_state.floating_point_operations_so_far
         num_floating_point_operations_since_last_log_event += num_floating_point_operations_in_batch
@@ -496,6 +510,7 @@ def train(
             history_wct,
             model,
             log_max_attention_logit,
+            history_consumed_tokens=history_consumed_tokens,
         )
 
         if (

@@ -348,6 +348,7 @@ def training_log(
     history_wct: list,
     model: list[MegatronModule],
     log_max_attention_logit: Optional[float] = None,
+    history_consumed_tokens: Optional[list] = None,
 ) -> bool:
     """Log training stats (losses, learning rate, timings, etc.).
 
@@ -485,6 +486,7 @@ def training_log(
                 seq_length=config.dataset.seq_length,
                 history_wct=history_wct,
                 window_size=logger_config.throughput_window_size,
+                history_consumed_tokens=history_consumed_tokens,
             )
             for metric, value in throughput_report.items():
                 writer.add_scalar(metric, value, iteration)
@@ -650,8 +652,11 @@ def training_log(
         elapsed_time = timers("interval-time").elapsed(barrier=True)
         elapsed_time_per_iteration = elapsed_time / total_iterations
 
-        # Calculate GPU utilization
-        num_flops = num_floating_point_operations(config, batch_size)
+        # Calculate GPU utilization using the actual padded seq len from the last batch.
+        # last_batch_seq_len is 0 before the first step (e.g. mock path that doesn't set it),
+        # so fall back to cfg.model.seq_length in that case.
+        actual_seq_len = train_state.last_batch_seq_len or None
+        num_flops = num_floating_point_operations(config, batch_size, seq_len=actual_seq_len)
         per_gpu_tf = num_flops / elapsed_time_per_iteration / get_world_size_safe() / 1e12
         print_rank_0(
             f"Step Time : {elapsed_time_per_iteration:.2f}s GPU utilization: {per_gpu_tf:.1f}MODEL_TFLOP/s/GPU"
@@ -904,7 +909,13 @@ def report_runtime(
     remaining_time = rate * (1 - elapsed_dur)
     time_metrics["time/remaining_estimate"] = remaining_time / divider
 
-    time_metrics["time/tokens"] = train_state.consumed_train_samples * seq_length
+    # Use actually-processed tokens when available (set by vlm_step); otherwise fall back
+    # to samples × seq_length which overcounts for variable-length batches.
+    time_metrics["time/tokens"] = (
+        train_state.consumed_train_tokens
+        if getattr(train_state, "consumed_train_tokens", 0) > 0
+        else train_state.consumed_train_samples * seq_length
+    )
     time_metrics["time/samples"] = train_state.consumed_train_samples
     time_metrics["time/batches"] = train_state.step
     time_metrics["time/total"] = (time.time() - start_time) / divider
@@ -918,6 +929,7 @@ def report_throughput(
     seq_length: int,
     history_wct: list,
     window_size: int,
+    history_consumed_tokens: Optional[list] = None,
 ) -> dict:
     """
     Logs the training throughput and utilization.
@@ -958,12 +970,17 @@ def report_throughput(
     if iteration >= window_size:
         history_iters = [i for i in range(iteration - window_size + 1, iteration + 1)]
         history_samples = [i * train_config.global_batch_size for i in history_iters]
-        history_tokens = [i * seq_length for i in history_samples]
         world_size = get_world_size_safe()
         elapsed_batches = len(history_samples) - 1
         elapsed_samples = int(history_samples[-1]) - int(history_samples[0])
-        elapsed_tokens = int(history_tokens[-1]) - int(history_tokens[0])
         elapsed_wct = history_wct[-1] - history_wct[0]
+        # Use actually-processed token counts when history_consumed_tokens is provided
+        # (populated by vlm_step using the real padded seq len, not cfg.model.seq_length).
+        # Fall back to samples × seq_length for paths that don't populate consumed_train_tokens.
+        if history_consumed_tokens is not None and len(history_consumed_tokens) >= window_size + 1:
+            elapsed_tokens = int(history_consumed_tokens[-1]) - int(history_consumed_tokens[0])
+        else:
+            elapsed_tokens = elapsed_samples * seq_length
 
         # Skip throughput calculation if elapsed_wct is zero or negative
         # This can happen during checkpoint resumption when history_wct is reinitialized
