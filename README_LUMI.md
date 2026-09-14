@@ -32,7 +32,7 @@ Engine, apex, flash-attn). Create a venv on top of the container and install the
 packages this port adds:
 
 ```bash
-singularity shell $SIF_plus            # $SIF_plus=/appl/local/laifs/containers/lumi-multitorch-u24r70f21m50t210-20260513_121430/lumi-multitorch-plus-u24r70f21m50t210-20260513_121430.sif (the LUMI container image)
+singularity shell $SIF_plus            # $SIF_plus=/appl/local/laifs/containers/lumi-multitorch-u24r70f21m50t210-20260807_115122/lumi-multitorch-plus-u24r70f21m50t210-20260807_115122.sif (the LUMI container image)
 python -m venv env_megatron --system-site-packages
 source env_megatron/bin/activate
 pip install --no-build-isolation \
@@ -41,6 +41,10 @@ pip install --no-build-isolation \
     hydra-core==1.3.2 \
     omegaconf==2.3.0
 ```
+
+The container comes from the LUMI AI Factory Services (LAIFS) collection under
+`/appl/local/laifs/containers`. See the [LAIFS container recipes](https://github.com/lumi-ai-factory/laifs-container-recipes/releases)
+for the naming scheme.
 
 `megatron-core 0.16.0` (`core_v0.16.0`) is provided as the `3rdparty/Megatron-LM`
 submodule. Pull it with:
