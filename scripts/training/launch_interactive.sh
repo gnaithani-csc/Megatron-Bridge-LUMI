@@ -45,6 +45,7 @@ model.gradient_accumulation_fusion=False "
 # Container image
 module use /appl/local/laifs/modules
 module load lumi-aif-singularity-bindings
+export SIF_plus="/appl/local/laifs/containers/lumi-multitorch-u24r70f21m50t210-20260807_115122/lumi-multitorch-plus-u24r70f21m50t210-20260807_115122.sif"
 CONTAINER_IMAGE=$SIF_plus
 VENV=$PROJ_DIR/env_megatron
 

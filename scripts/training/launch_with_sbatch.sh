@@ -68,7 +68,7 @@ logger.log_throughput_to_tensorboard=true \
 logger.log_throughput=true \
 logger.log_interval=5 \
 model.transformer_impl=te \
-train.train_iters=10  \
+train.train_iters=50  \
 model.gradient_accumulation_fusion=False \
 model.cross_entropy_fusion_impl=te "
 
@@ -79,7 +79,7 @@ model.cross_entropy_fusion_impl=te "
 # Container image (set by lumi-aif-singularity-bindings)
 module use /appl/local/laifs/modules
 module load lumi-aif-singularity-bindings
-export SIF_plus="/appl/local/laifs/containers/lumi-multitorch-u24r70f21m50t210-20260513_121430/lumi-multitorch-plus-u24r70f21m50t210-20260513_121430.sif"
+export SIF_plus="/appl/local/laifs/containers/lumi-multitorch-u24r70f21m50t210-20260807_115122/lumi-multitorch-plus-u24r70f21m50t210-20260807_115122.sif"
 CONTAINER_IMAGE=$SIF_plus
 CONTAINER_MOUNTS=""
 VENV=$PROJ_DIR/env_megatron

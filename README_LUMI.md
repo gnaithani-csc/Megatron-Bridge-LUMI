@@ -32,7 +32,8 @@ Engine, apex, flash-attn). Create a venv on top of the container and install the
 packages this port adds:
 
 ```bash
-singularity shell $SIF_plus            # $SIF_plus=/appl/local/laifs/containers/lumi-multitorch-u24r70f21m50t210-20260807_115122/lumi-multitorch-plus-u24r70f21m50t210-20260807_115122.sif (the LUMI container image)
+export SIF_plus=/appl/local/laifs/containers/lumi-multitorch-u24r70f21m50t210-20260807_115122/lumi-multitorch-plus-u24r70f21m50t210-20260807_115122.sif
+singularity shell $SIF_plus
 python -m venv env_megatron --system-site-packages
 source env_megatron/bin/activate
 pip install --no-build-isolation \
